@@ -1,9 +1,11 @@
+import os.path
+
 import pandas as pd
 import time
 import plotnine as p9
 import numpy as np
 import pickle
-#import kipoiseq
+import kipoiseq
 #import tensorflow
 from palettable.matplotlib import matplotlib
 from plotnine import geom_boxplot,geom_point
@@ -18,8 +20,7 @@ from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def lasso_regression():
-
+def lasso_regression(incl_rbp,incl_mirna,rdc_transcripts,drop_codons):
 
     tissue_results = []
 
@@ -28,8 +29,8 @@ def lasso_regression():
 
         start = time.time()
         df_tiss = df_hl_enc.loc[df_hl_enc['tissue'] == i]
-
-        tissue_results.append(per_tissue(df_tiss,df_rbp,df_mirna ,i,True,False))
+        df_tiss.index = df_hl.index
+        tissue_results.append(per_tissue(df_tiss,df_rbp,df_mirna ,i,incl_rbp,incl_mirna,rdc_transcripts,drop_codons))
         end = time.time()
         print(end - start)
 
@@ -44,23 +45,19 @@ def lasso_regression():
     pl_m2e = pd.DataFrame(m2e)
 
     results = [tissue_results,pl_var,pl_m2e]
-    pickle.dump(results, open("./pickles/lasso_relative_per_tissue_base.p", "wb"))                ############## CHANGE HERE
 
 
 
+    #pickle dump
+    f_path = "./pickles/"+file_name(incl_rbp,incl_mirna,rdc_transcripts,drop_codons,False)+".p"
+    pickle.dump(results, open(f_path, "wb"))
 
 
-
-
-
-def per_tissue(df_hl,df_rbp,df_mirna,i,rbp,mirna):
+def per_tissue(df_hl,df_rbp,df_mirna,i,rbps,mirnas,rdcs,dr_cdn):
 
     df1 = df_hl.drop(columns=['cds', '3_utr', '5_utr', 'all','tissue'])
     df1 = df1.drop(columns=codons)
 
-    if rbp:
-        df_rbp = df_rbp.drop(columns=("chromosome"))
-        df1 = pd.concat([df1,df_rbp],axis=1)
 
     df1 = df1.loc[df1.loc[:, ['half_life']].dropna().index]
     df1 = df1.fillna(0)
@@ -84,11 +81,32 @@ def per_tissue(df_hl,df_rbp,df_mirna,i,rbp,mirna):
     search = GridSearchCV(model, param, scoring='neg_mean_absolute_error', n_jobs=-1, cv=cv)
     result = search.fit(X, y)
 
-    df2 = df.drop(columns=['cds', '3_utr', '5_utr','all'])
+    df2 = df_hl.drop(columns=['cds', '3_utr', '5_utr','all'])
+    if dr_cdn:
+        df2 = df2.drop(columns=codons)
+
+
+    if rbp:
+        df_rbp = df_rbp.drop(columns=("chromosome"))
+
+        if rdcs:
+            a_series = (df_rbp != 0).any(axis=1)
+            df_rbp = df_rbp.loc[a_series]
+
+        df2 = df2.loc[df_rbp.index]
+        df2 = pd.concat([df2, df_rbp], axis=1)
+
+
+    if mirna:
+        if rdcs:
+            a_series = (df_mirna != 0).any(axis=1)
+            df_mirna = df_rbp.loc[a_series]
+        df2 = df2.loc[df_mirna.index]
+        df2 = pd.concat([df2,df_mirna],axis=1)
+
     df2 = df2.loc[df1.loc[:, ['half_life']].dropna().index]
     df2 = df2.fillna(0)
-    X = df2.drop('half_life', axis=1)
-    y = df2['half_life']
+
 
     #train test split by chromosome
     train = df2[~df2['chromosome'].isin(chrom_test)]
@@ -127,26 +145,120 @@ def per_tissue(df_hl,df_rbp,df_mirna,i,rbp,mirna):
 
     return [xpv,msqe,vs,coef]
 
-#MAIN####################################MAIN#########################################################MAIN
+def reduce_feature_to_transcripts_hit_on_chr(df):
+
+    index_chr_dict = {}
+
+    for i in df.index:
+        index_chr_dict[i] = df.loc[i]["chromosome"]
+
+    df = df.drop(columns="chromosome")
+    a_series = (df != 0).any(axis=1)
+    df = df.loc[a_series]
+    df = df.assign(chromosome="zero")
+
+
+    for i in df.index:
+        df["chromosome"][i]  = index_chr_dict[i]
+
+    return(df)
+
+def get_balanced_feature_df(df_feat,df_tiss,):
+
+    #rmv hit transcripts
+    df_tiss = df_tiss.drop(df_feat.index)
+    print()
+
+def file_name(incl_rbp,incl_mirna,rdc_transcripts,drop_codons,mk_path):
+
+    feature = "_base"
+    if incl_rbp:
+        feature = "_rbp"
+    if incl_mirna:
+        feature = "_mirna"
+
+    transcripts = "_t_all"
+    if rdc_transcripts:
+        transcripts = "_t_rdc"
+    cdns = "_cdn"
+    if drop_codons:
+        cdns = "_cdn_d"
+
+    file_name = "lasso" + feature + transcripts + cdns
+
+    if mk_path:
+        path = "results/relative/"+feature
+        if not os.path.isdir(path):
+            os.mkdir(path)
+            #os.mkdir(path+"/pred_vs_truth")
+        return path
+
+    return file_name
+
+def plot_results(res,incl_rbp,incl_mirna,rdc_transcripts,drop_codons):
+
+    path = file_name(incl_rbp,incl_mirna,rdc_transcripts,drop_codons,True)
+    name = file_name(incl_rbp,incl_mirna,rdc_transcripts,drop_codons,False)
+    lasso_list = res[0]
+    df_xpv = res[1]
+    df_mse = res[2]
+
+    # lasso_list[i] has xpv at lasso_list[i][0] ,mse at [1], vs at [2] and  coef at [3]
+
+    xpv_plot = p9.ggplot(df_xpv, p9.aes('tissue', 'exp_var_sc')) + p9.geom_col() + p9.theme(
+        axis_text_x=p9.element_text(angle=90))
+    xpv_plot.save(filename=path+"/xpv_"+name+".jpg")
+
+    mse_plot = p9.ggplot(df_mse, p9.aes('tissue', '%root_mean_sq_err')) + p9.geom_col() + p9.theme(
+        axis_text_x=p9.element_text(angle=90))
+    mse_plot.save(filename=path+"/mse_"+name+".jpg")
+
+    df_coef = pd.DataFrame(columns=lasso_list[0][3].columns)
+
+    for i in range(len(tissues)):
+        #cur_lasso = lasso_list[i][2]
+        #sns.scatterplot(data=cur_lasso.T, x="pred", y="truth").set(title=tissues[i])
+
+        #plt.savefig("results/relative/pred_vs_truth/" + tissues[i])  ############## CHANGE HERE
+        #plt.clf()
+
+        # built the coefficient dataframe
+        df_coef = df_coef.append(lasso_list[i][3])
+
+    df_coef = df_coef.replace(to_replace=0.0, value=0.00000000001)
+    coef_plot = sns.heatmap(df_coef)
+
+    plt.savefig(path+"/heat_coef_"+name+".png")
+    plt.clf()
+
+    rsc = df_coef.drop(columns=["TGA", "TAA", "TAG"])
+    rsc_plot = sns.heatmap(rsc)
+    plt.savefig(path+"/heat_coef_"+name+".png")
+
+
+
+#MAIN####################################MAIN#########################################################MAIN##############################################################
 
 #load data and prepare dataframes and lists
-df_hl = tissue_hl = pd.read_csv('genomic_sequence_plus_features_hl_all_tissues.csv', index_col=0)
+df_hl = pd.read_csv('genomic_sequence_plus_features_hl_all_tissues.csv',index_col=0)
+df_hl = df_hl.drop(columns=["TGA","TAA","TAG"]) #drop stop codons
 
+codons = ['AAA', 'AAC','AAG', 'AAT', 'ACA', 'ACC', 'ACG', 'ACT', 'AGA', 'AGC', 'AGG', 'AGT','ATA', 'ATC', 'ATG', 'ATT', 'CAA', 'CAC', 'CAG', 'CAT', 'CCA', 'CCC','CCG', 'CCT', 'CGA', 'CGC', 'CGG', 'CGT', 'CTA', 'CTC', 'CTG', 'CTT','GAA', 'GAC', 'GAG', 'GAT', 'GCA', 'GCC', 'GCG', 'GCT', 'GGA', 'GGC',
+            'GGG', 'GGT', 'GTA', 'GTC', 'GTG', 'GTT', 'TAC', 'TAT','TCA', 'TCC', 'TCG', 'TCT', 'TGC', 'TGG', 'TGT', 'TTA', 'TTC','TTG', 'TTT']
 
 df_mirna = pd.read_csv("./results/Number_RNA_family.csv",index_col=0)
 df_mirna["sum"] = df_mirna.sum(axis=1)
+df_mirna = df_mirna.set_index("id")
 
 df_rbp = pd.read_csv("./results/rbp_utr_gencode_19_binding.csv",index_col=0)
 df_rbp["sum"] = df_rbp.sum(axis=1)
 
-codons = ['AAA', 'AAC','AAG', 'AAT', 'ACA', 'ACC', 'ACG', 'ACT', 'AGA', 'AGC', 'AGG', 'AGT','ATA', 'ATC', 'ATG', 'ATT', 'CAA', 'CAC', 'CAG', 'CAT', 'CCA', 'CCC','CCG', 'CCT', 'CGA', 'CGC', 'CGG', 'CGT', 'CTA', 'CTC', 'CTG', 'CTT','GAA', 'GAC', 'GAG', 'GAT', 'GCA', 'GCC', 'GCG', 'GCT', 'GGA', 'GGC',
-            'GGG', 'GGT', 'GTA', 'GTC', 'GTG', 'GTT', 'TAA', 'TAC', 'TAG', 'TAT','TCA', 'TCC', 'TCG', 'TCT', 'TGA', 'TGC', 'TGG', 'TGT', 'TTA', 'TTC','TTG', 'TTT']
 
 #log codon frequencies (did not imporve performance but made it far worse)
 #df_hl[codons]=np.log(df_hl[codons].replace(to_replace=0.0,value=0.00000000001))
 
 #get a list of all tissues
-tissues = tissue_hl.columns[:49].tolist()
+tissues = df_hl.columns[:49].tolist()
 
 #set the test chromosomes
 chrom_test=['chr1','chr8','chr9','chr2', 'chr3','chr4']
@@ -154,19 +266,18 @@ chrom_test=['chr1','chr8','chr9','chr2', 'chr3','chr4']
 
 #transform half life from absolute values to relative to the mean
 means = []
-for row in tissue_hl.itertuples():
+for row in df_hl.itertuples():
     mean = np.nanmean(row[1:50])
     means.append(mean)
 
-tissue_hl.insert(loc=49, column='Mean', value=means)
+df_hl.insert(loc=49, column='Mean', value=means)
 # disable this loop to predict absolute values, activate it to predict relative to the mean #################### SWITCH ABS/REL
-
 for tissue in tissues:
-    tissue_hl[tissue] = tissue_hl[tissue]-tissue_hl['Mean']
-
+    df_hl[tissue] = df_hl[tissue]-df_hl['Mean']
+#add column to predict mean hl
 tissues.append("Mean")
 
-df_hl_enc = tissue_hl
+df_hl_enc =df_hl
 
 
 # encode tissues in a single coloumn
@@ -180,54 +291,26 @@ df_hl_enc=pd.melt(df_hl_enc, id_vars=df_hl_enc.columns[len(tissues):], value_var
 
 #regression needs to be done only once for a given feature / prediction(abs/rel) as its results are stored in a pkl
 #lines where path changes might be neccessary are marked with "CHANGE HERE"
-lasso_regression()
 
-#load regression results from pkl for further analysis at the end of lasso_regression()
-results = pickle.load(open("./pickles/lasso_relative_per_tissue_base.p", "rb"))                                ############## CHANGE HERE
 
-lasso_list = results[0]
-df_xpv = results[1]
-df_mse = results[2]
+rbp = False
+mirna = False
+rdc = False
+cdns = True
 
-# lasso_list[i] ihas xpv at lasso_list[i][0] ,mse at [1], vs at [2] and  coef at [3]
+lasso_regression(rbp,mirna,rdc,cdns)
+f_path = "./pickles/"+file_name(rbp,mirna,rdc,cdns,False)+".p"
+results = pickle.load(open(f_path, "rb"))
+plot_results(results,rbp,mirna,rdc,cdns)
 
-xpv_plot = p9.ggplot(df_xpv, p9.aes('tissue', 'exp_var_sc')) + p9.geom_col() + p9.theme(axis_text_x = p9.element_text(angle = 90))
-xpv_plot.save(filename="results/relative/base/xpv_lasso_relative_per_tissue.jpg")                      ############## CHANGE HERE
 
-mse_plot = p9.ggplot(df_mse, p9.aes('tissue', '%root_mean_sq_err')) + p9.geom_col() + p9.theme(axis_text_x = p9.element_text(angle = 90))
-mse_plot.save(filename="results/relative/base/mse_lasso_relative_per_tissue.jpg")                        ############## CHANGE HERE
-
-df_coef = pd.DataFrame(columns=lasso_list[0][3].columns)
-
-for i in range(len(tissues)):
-
-    cur_lasso = lasso_list[i][2]
-    sns.scatterplot(data=cur_lasso.T, x="pred", y="truth").set(title=tissues[i])
-
-    plt.savefig("results/relative/base/pred_vs_truth/"+tissues[i])                          ############## CHANGE HERE
-    plt.clf()
-    #built the coefficient dataframe
-    df_coef = df_coef.append(lasso_list[i][3])
-
-print()
-df_coef = df_coef.replace(to_replace=0.0,value=0.00000000001)
-coef_plot = sns.heatmap(df_coef)
-
-plt.savefig("results/relative/heat_coef_relative.png")                                                   ############## CHANGE HERE
-plt.clf()
-
-                                                    ############## CHANGE HERE
-rsc = df_coef.drop(columns=["TGA","TAA","TAG"])
-rsc_plot = sns.heatmap(rsc)
-plt.savefig("results/relative/heat_coef_relative_rescale.png")
-print()
 
 '''
  
  ################################################################################
 # get counts of transcripts per chromosome
 chr_hl = {}
-
+github
 
 for t in set(df_hl["chromosome"]):
     n = df_hl["chromosome"].value_counts()[t]
